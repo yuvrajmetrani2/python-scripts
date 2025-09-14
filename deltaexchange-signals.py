@@ -7,7 +7,8 @@ from datetime import datetime, timedelta
 
 # ---------- Settings ----------
 # EDIT THESE TO SUIT YOUR NEEDS
-SYMBOL = "DOGEUSD"                       # confirm exact Delta product symbol
+SYMBOLS = ["DOGEUSD", "ETHUSD", "SOLUSD", "BTCUSD"]
+#SYMBOL =  "DOGEUSD" # "ETHUSD" "SOLUSD" "BTCUSD" "DOGEUSD"    # confirm exact Delta product symbol
 INTERVALS = ["5m", "15m", "30m", "1h", "4h", "1d"]
 DAYS = 30                                 # historical days to fetch for backtest & smoothing
 LOOKBACK_CANDLES = 6                       # consider signals in the last N closed candles
@@ -230,13 +231,13 @@ def latest_signals_with_probability(df_full: pd.DataFrame, lookback_candles=6, l
     return fresh_signals, hist_results, win_rate
 
 # ---------- Multi-timeframe runner ----------
-def run_all(symbol=SYMBOL, intervals=INTERVALS, days=DAYS,
+def run_all(symbol, intervals=INTERVALS, days=DAYS,
             lookback_candles=LOOKBACK_CANDLES, lookahead_bars=LOOKAHEAD_BARS):
     all_latest = []
     summary = []
 
     for interval in intervals:
-        print(f"\n--- Processing {symbol} | {interval} ---")
+        #print(f"\n--- Processing {symbol} | {interval} ---")
         try:
             df = fetch_ohlc(symbol=symbol, resolution=interval)
         except Exception as e:
@@ -276,16 +277,17 @@ def run_all(symbol=SYMBOL, intervals=INTERVALS, days=DAYS,
                     "prob_%": s["probability_%"]
                 }
                 all_latest.append(s_out)
-                print("Fresh signal:", s_out)
+                # print("Fresh signal:", s_out)
         else:
-            print("No fresh signals in last", lookback_candles, "closed candles for", interval)
+            pass
+            #print("No fresh signals in last", lookback_candles, "closed candles for", interval)
 
     summary_df = pd.DataFrame(summary)
-    print("\n=== Summary (per timeframe) ===")
-    print(summary_df.to_string(index=False))
+    #print("\n=== Summary (per timeframe) ===")
+    #print(summary_df.to_string(index=False))
 
     if all_latest:
-        print("\n=== All fresh signals (summarized) ===")
+        print(f"\n=== All fresh signals (summarized for {symbol}) ===")
         print(pd.DataFrame(all_latest).to_string(index=False))
     else:
         print("\nNo fresh signals across selected timeframes.")
@@ -294,4 +296,5 @@ def run_all(symbol=SYMBOL, intervals=INTERVALS, days=DAYS,
 
 # ---------- Run when executed ----------
 if __name__ == "__main__":
-    run_all()
+    for sym in SYMBOLS:
+        run_all(sym)
