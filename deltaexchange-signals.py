@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
+
+#NOTE: Install Beep package if OS is linux
+#TODO : Get More Frequent Indicators
+
 import time
 import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+import sys
+import pytz
+import platform, os, winsound
+import logging
+
+
 
 # ---------- Settings ----------
 # EDIT THESE TO SUIT YOUR NEEDS
@@ -16,17 +26,76 @@ LOOKAHEAD_BARS = 50                        # lookahead window (bars) when evalua
 MAX_CANDLES_PER_REQUEST = 1000
 SLEEP_BETWEEN_CHUNKS = 0.12
 TIMEZONE = "Asia/Kolkata"                  # all times converted to IST
-
+log_file_name = "3-trade-signals.log"
 # ---------- Utilities ----------
 SECS = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400}
 
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    
+    handlers=[
+        logging.FileHandler(log_file_name, mode='w'),  # Write logs to a file
+        #logging.StreamHandler()  # Also print logs to the console
+    ]
+)
+
+'''
 def safe_request(url, params, timeout=20):
     resp = requests.get(url, params=params, timeout=timeout)
     resp.raise_for_status()
     return resp.json()
+'''
+    
+def safe_request(url, params, retries=3, timeout=20):
+    for i in range(retries):
+        try:
+            r = requests.get(url, params=params, timeout=10)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            print(f"⚠️ Request failed ({i+1}/{retries}): {e}")
+            time.sleep(2)
+    return {}
+    
+def beep():
+    """
+    Generates a simple beep sound.
+    
+    The function checks the operating system and uses the appropriate
+    library to generate the sound.
+    """
+    system = platform.system()
+    
+    if system == 'Windows':
+        # winsound is a built-in library for Windows.
+        #import winsound
+        winsound.Beep(2000,200) # Set Frequency in Hertz, Duration in ms
+        winsound.Beep(1100,300) # Set Frequency in Hertz, Duration in ms
+        #print("Beep sound generated on Windows.")
+        
+    elif system == 'Linux':
+        # On Linux, you can use a command-line tool like 'beep'.
+        # This requires the 'beep' package to be installed.
+        #import os
+        os.system('beep')
+        #print("Beep sound generated on Linux.")
+        
+    elif system == 'Darwin':  # macOS
+        # On macOS, you can use the 'say' command to make a sound.
+        # This is a bit of a workaround to get a notification sound.
+        #import os
+        os.system('say " "')
+        #print("Beep sound generated on macOS.")
+        
+    else:
+        pass
+        #print("Beeper not supported on this operating system.")
 
 # ---------- Fetch OHLC (chunk-safe) ----------
-def fetch_ohlc(symbol="DOGEUSD", resolution="1h", limit=500):
+def fetch_ohlc(symbol="DOGEUSD", resolution="5m", limit=500):
     """
     Fetch latest OHLC candles safely (IST timezone).
     limit: number of candles to fetch (default: 500)
@@ -68,6 +137,7 @@ def RSI(series: pd.Series, period: int = 14) -> pd.Series:
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
+
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     # EMA200
@@ -93,6 +163,50 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["StochRSI_k"] = stoch_k
     df["StochRSI_d"] = stoch_d
     return df
+
+
+def analyze_signals(df, resolution):
+    signals = []
+    for i in range(50, len(df)):
+        candle = df.iloc[i]
+        time_ist = candle.name.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+        # Indicators
+        ema200 = df["ema200"].iloc[i]
+        close = candle["close"]
+        stoch_k = df["stoch_k"].iloc[i]
+        stoch_d = df["stoch_d"].iloc[i]
+        macd = df["macd"].iloc[i]
+        signal = df["macd_signal"].iloc[i]
+        hist = df["macd_hist"].iloc[i]
+
+        # Debug logs (print each condition)
+        logging.debug(f"{time_ist} | Close={close:.5f}, EMA200={ema200:.5f}, "
+                      f"StochRSI=({stoch_k:.2f},{stoch_d:.2f}), "
+                      f"MACD={macd:.6f}, Signal={signal:.6f}, Hist={hist:.6f}")
+
+        # Conditions
+        ema_cond = close > ema200
+        stoch_cond = (stoch_k > stoch_d) and (stoch_k < 20)   # example bullish
+        macd_cond = (macd > signal) and (hist > 0)
+
+        # If signal
+        if ema_cond and stoch_cond and macd_cond:
+            logging.info(f"LONG Signal at {time_ist} "
+                         f"(Triggered by: EMA={ema_cond}, StochRSI={stoch_cond}, MACD={macd_cond})")
+
+            signals.append({
+                "time": time_ist,
+                "side": "LONG",
+                "entry": close,
+                "sl": df["low"].iloc[i-1],
+                "tp": close * 1.005,
+                "prob": 50  # placeholder
+            })
+
+    return signals
+
+
 
 # ---------- Generate signals on any provided DF (history or window) ----------
 def generate_signals(df: pd.DataFrame):
@@ -126,6 +240,7 @@ def generate_signals(df: pd.DataFrame):
             sl = float(prev_low)
             tp = float(price + 2 * risk)   # 2:1
             rr = (tp - price) / risk
+            
             signals.append({"time": time_i, "side": "LONG", "entry": float(price),
                             "sl": sl, "tp": tp, "rr": round(rr, 3)})
 
@@ -191,6 +306,85 @@ def backtest_signals_limited(df: pd.DataFrame, signals, lookahead_bars=50):
         results.append(r)
     return results
 
+
+def latest_signals_with_probability(
+    df_full: pd.DataFrame, 
+    lookback_candles=6, 
+    lookahead_bars=50, 
+    pip_size=0.0001, 
+    lot_size=100000
+):
+    """
+    df_full: dataframe with indicators already applied, tz-aware times (IST)
+    returns list of latest signals (within last 'lookback_candles' closed candles),
+    with a 'probability_%' computed from historical backtest (limited lookahead).
+    Adds pips, risk/reward ratio, and profit per 1 lot.
+    """
+    if df_full is None or len(df_full) < (lookback_candles + 2):
+        return []
+
+    df = df_full.copy().iloc[:-1]  # drop most recent (possible incomplete) candle
+
+    # compute all historical signals on df (for probability)
+    hist_signals = generate_signals(df)
+    hist_results = backtest_signals_limited(df, hist_signals, lookahead_bars=lookahead_bars)
+
+    # compute win-rate from closed outcomes
+    closed = [r for r in hist_results if r["outcome"] in ("TP", "SL")]
+    wins = sum(1 for r in closed if r["outcome"] == "TP")
+    losses = sum(1 for r in closed if r["outcome"] == "SL")
+    win_rate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0.0
+
+    # window to search for fresh signals
+    window = df.iloc[-(lookback_candles + 1):].copy()
+    fresh_signals = generate_signals(window)
+
+    window_times = set(window["time"].tolist())
+    fresh_signals = [s for s in fresh_signals if s["time"] in window_times]
+
+    # pip value for 1 lot
+    pip_value_per_lot = pip_size * lot_size
+
+    # attach probability + pip calculations
+    for s in fresh_signals:
+        s["probability_%"] = round(win_rate, 2)
+
+        entry = s.get("entry", None)
+        tp = s.get("tp", None)
+        sl = s.get("sl", None)
+
+        if entry and tp:
+            s["tp_pips"] = round((tp - entry) / pip_size, 1) if s["side"] == "LONG" else round((entry - tp) / pip_size, 1)
+        else:
+            s["tp_pips"] = None
+
+        if entry and sl:
+            s["sl_pips"] = round((entry - sl) / pip_size, 1) if s["side"] == "LONG" else round((sl - entry) / pip_size, 1)
+        else:
+            s["sl_pips"] = None
+
+        # Risk/Reward ratio
+        if s["tp_pips"] and s["sl_pips"] and s["sl_pips"] != 0:
+            s["rr_ratio"] = round(s["tp_pips"] / s["sl_pips"], 2)
+        else:
+            s["rr_ratio"] = None
+
+        # Profit for 1 lot at TP
+        if s["tp_pips"]:
+            s["profit_1lot"] = round(s["tp_pips"] * pip_value_per_lot, 2)
+        else:
+            s["profit_1lot"] = None
+
+        logging.info(
+            f"Signal: {s['side']} | Time={s['time']} | Entry={entry}, SL={sl}, TP={tp} | "
+            f"TP_pips={s['tp_pips']}, SL_pips={s['sl_pips']}, RR={s['rr_ratio']} | "
+            f"Prob={s['probability_%']}% | Profit(1lot)={s['profit_1lot']}"
+        )
+
+    return fresh_signals, hist_results, win_rate
+
+
+'''
 # ---------- Get latest signals in the last N candles (IST) and attach probability ----------
 def latest_signals_with_probability(df_full: pd.DataFrame, lookback_candles=6, lookahead_bars=50):
     """
@@ -227,8 +421,11 @@ def latest_signals_with_probability(df_full: pd.DataFrame, lookback_candles=6, l
     # attach probability to each fresh signal
     for s in fresh_signals:
         s["probability_%"] = round(win_rate, 2)
+        logging.info(f"Generated Signal: {s["side"]} at {s["time"]} with probability {s["probability_%"]}")
 
     return fresh_signals, hist_results, win_rate
+
+'''
 
 # ---------- Multi-timeframe runner ----------
 def run_all(symbol, intervals=INTERVALS, days=DAYS,
@@ -255,25 +452,32 @@ def run_all(symbol, intervals=INTERVALS, days=DAYS,
         fresh_signals, hist_results, win_rate = latest_signals_with_probability(
             df_ind, lookback_candles=lookback_candles, lookahead_bars=lookahead_bars
         )
-
+        
         # summarize
         total_hist_signals = len(hist_results)
         wins = sum(1 for r in hist_results if r.get("outcome") == "TP")
         losses = sum(1 for r in hist_results if r.get("outcome") == "SL")
         summary.append({"Interval": interval, "Signals": total_hist_signals, "Wins": wins,
                         "Losses": losses, "Win Rate %": round(win_rate, 2)})
-
+        
         if fresh_signals:
             for s in fresh_signals:
                 # convert time to string in IST for printing
+                enter = " -> " if s["probability_%"] >= 40 else "    "
+                #Beep at Strong Signals - win rate of > 40%
+                if s["probability_%"] >= 40:
+                    beep()
                 s_out = {
-                    "interval": interval,
+                    "   ": enter,
+                    "int": interval,
                     "time_ist": s["time"].strftime("%Y-%m-%d %H:%M:%S %Z"),
                     "side": s["side"],
                     "entry": round(s["entry"], 8),
                     "sl": round(s["sl"], 8),
                     "tp": round(s["tp"], 8),
-                    "rr": s["rr"],
+                    #"rr": s["rr"],
+                    "tp_pips": s["tp_pips"],
+                    "sl_pips": s["sl_pips"],
                     "prob_%": s["probability_%"]
                 }
                 all_latest.append(s_out)
@@ -296,5 +500,12 @@ def run_all(symbol, intervals=INTERVALS, days=DAYS,
 
 # ---------- Run when executed ----------
 if __name__ == "__main__":
-    for sym in SYMBOLS:
-        run_all(sym)
+    while True:
+        for sym in SYMBOLS:
+            run_all(sym)
+        ist = pytz.timezone("Asia/Kolkata")
+        now = datetime.now(ist)
+        
+        print(f"\n ----------------- ", now.strftime("%Y-%m-%d %H:%M:%S") , "------------------------------- ")
+        
+        time.sleep(300)
